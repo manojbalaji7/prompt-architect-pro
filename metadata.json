@@ -1,0 +1,8 @@
+{
+  "name": "Prompt Architect Pro",
+  "description": "Expert AI prompt architect for Google Gemini to transform rough requirements into structured, safe, production-grade prompts with readiness scoring and review.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
