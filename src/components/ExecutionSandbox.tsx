@@ -45,6 +45,7 @@ export const ExecutionSandbox: React.FC<ExecutionSandboxProps> = ({
   const [sampleInputs, setSampleInputs] = useState('');
   const [copiedOutput, setCopiedOutput] = useState(false);
   const [outputView, setOutputView] = useState<'preview' | 'raw'>('preview');
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const currentModel = getModelById(modelSettings.selectedModel);
 
@@ -54,6 +55,20 @@ export const ExecutionSandbox: React.FC<ExecutionSandboxProps> = ({
       setPrompt(initialPrompt);
     }
   }, [initialPrompt]);
+
+  // Live timer for execution feedback
+  React.useEffect(() => {
+    let interval: any = null;
+    if (isLoading) {
+      setElapsedSeconds(0);
+      interval = setInterval(() => {
+        setElapsedSeconds((prev) => +(prev + 0.1).toFixed(1));
+      }, 100);
+    } else {
+      clearInterval(interval);
+    }
+    return () => clearInterval(interval);
+  }, [isLoading]);
 
   const handleRun = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,6 +140,17 @@ export const ExecutionSandbox: React.FC<ExecutionSandboxProps> = ({
           </div>
         </div>
 
+        {/* Inline Error Banner if present */}
+        {errorMessage && (
+          <div className="p-3.5 rounded-xl bg-rose-950/70 border border-rose-800/80 text-rose-200 text-xs flex items-start gap-2.5">
+            <XCircle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <strong className="font-semibold block text-rose-100">Execution Error:</strong>
+              <span>{errorMessage}</span>
+            </div>
+          </div>
+        )}
+
         <form onSubmit={handleRun} className="space-y-4">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Prompt To Test */}
@@ -176,8 +202,8 @@ export const ExecutionSandbox: React.FC<ExecutionSandboxProps> = ({
             >
               {isLoading ? (
                 <>
-                  <Sparkles className="w-4 h-4 animate-spin" />
-                  <span>Executing in {currentModel.name}...</span>
+                  <Sparkles className="w-4 h-4 animate-spin text-emerald-200" />
+                  <span>Executing in {currentModel.name}... ({elapsedSeconds}s)</span>
                 </>
               ) : (
                 <>

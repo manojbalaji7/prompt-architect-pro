@@ -4,6 +4,7 @@ import { getModelById } from '../lib/models';
 import { ReadinessMeter } from './ReadinessMeter';
 import { ModelDropdown } from './ModelDropdown';
 import { StructuredPromptViewer } from './StructuredPromptViewer';
+import { ClarificationCard } from './ClarificationCard';
 import { 
   ShieldCheck, 
   Sparkles, 
@@ -22,7 +23,7 @@ import confetti from 'canvas-confetti';
 
 interface ReviewWorkspaceProps {
   initialInput?: string;
-  onReview: (existingPrompt: string) => Promise<void>;
+  onReview: (existingPrompt: string, force?: boolean) => Promise<void>;
   reviewResult: ReviewResult | null;
   isLoading: boolean;
   onSendToSandbox: (prompt: string) => void;
@@ -58,6 +59,17 @@ export const ReviewWorkspace: React.FC<ReviewWorkspaceProps> = ({
     e.preventDefault();
     if (!existingPrompt.trim()) return;
     await onReview(existingPrompt.trim());
+  };
+
+  const handleAnswerClarifications = async (answers: string) => {
+    const enrichedPrompt = `${existingPrompt}\n\n[USER CLARIFICATIONS & ADDITIONAL DETAILS]:\n${answers}`;
+    setExistingPrompt(enrichedPrompt);
+    await onReview(enrichedPrompt);
+  };
+
+  const handleForceGenerate = async () => {
+    if (!existingPrompt.trim()) return;
+    await onReview(existingPrompt.trim(), true);
   };
 
   const handleCopyRevised = () => {
@@ -230,106 +242,122 @@ export const ReviewWorkspace: React.FC<ReviewWorkspaceProps> = ({
             </div>
           )}
 
-          {/* View Mode Toggle Bar */}
-          <div className="flex items-center justify-between gap-3 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-slate-200 ml-2">Output Presentation:</span>
-              <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
-                <button
-                  onClick={() => setViewMode('structured')}
-                  className={`px-3 py-1 rounded-md font-medium transition ${
-                    viewMode === 'structured'
-                      ? 'bg-indigo-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Standard 10-Section Specification
-                </button>
-                <button
-                  onClick={() => setViewMode('diff')}
-                  className={`px-3 py-1 rounded-md font-medium transition ${
-                    viewMode === 'diff'
-                      ? 'bg-indigo-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  Side-by-Side Comparison
-                </button>
-              </div>
-            </div>
-
-            <button
-              onClick={() => onSendToSandbox(reviewResult.revisedPrompt)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-sm transition"
-            >
-              <span>Test in Sandbox</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {/* Standard 10-Section Structured Prompt Viewer */}
-          {viewMode === 'structured' ? (
-            <StructuredPromptViewer
-              promptText={reviewResult.revisedPrompt}
-              structuredSections={reviewResult.structuredSections}
-              onSendToSandbox={onSendToSandbox}
-              onRefine={() => {}}
-              targetModel={modelSettings.selectedModel}
+          {/* Clarification Box if score < 80% and questions exist in Review Mode */}
+          {reviewResult.readinessScore < 80 && reviewResult.clarificationQuestions && reviewResult.clarificationQuestions.length > 0 && (
+            <ClarificationCard
+              questions={reviewResult.clarificationQuestions}
+              provisionalOutline={reviewResult.provisionalOutline}
+              onAnswerAndRefine={handleAnswerClarifications}
+              isLoading={isLoading}
+              onForceGenerate={handleForceGenerate}
             />
-          ) : (
-            <div className="rounded-2xl bg-slate-900/90 border border-slate-800 overflow-hidden shadow-2xl">
-              <div className="px-5 py-3.5 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between gap-3">
+          )}
+
+          {/* Revised Output Presentation (When score >= 80 or force generated) */}
+          {reviewResult.revisedPrompt && (
+            <>
+              {/* View Mode Toggle Bar */}
+              <div className="flex items-center justify-between gap-3 bg-slate-900/60 p-2 rounded-xl border border-slate-800">
                 <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <h3 className="text-sm font-bold text-slate-100">Side-by-Side Architectural Diff</h3>
+                  <span className="text-xs font-bold text-slate-200 ml-2">Output Presentation:</span>
+                  <div className="flex items-center bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs">
+                    <button
+                      onClick={() => setViewMode('structured')}
+                      className={`px-3 py-1 rounded-md font-medium transition ${
+                        viewMode === 'structured'
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Standard 10-Section Specification
+                    </button>
+                    <button
+                      onClick={() => setViewMode('diff')}
+                      className={`px-3 py-1 rounded-md font-medium transition ${
+                        viewMode === 'diff'
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Side-by-Side Comparison
+                    </button>
+                  </div>
                 </div>
 
                 <button
-                  onClick={handleCopyRevised}
-                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm transition"
+                  onClick={() => onSendToSandbox(reviewResult.revisedPrompt!)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-sm transition"
                 >
-                  {copiedRevised ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-300" />
-                      <span>Copied Revised!</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>Copy Revised</span>
-                    </>
-                  )}
+                  <span>Test in Sandbox</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
-                {/* Original */}
-                <div className="p-4 space-y-2 bg-slate-950/40">
-                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
-                    <span>Input Prompt Submitted</span>
-                    <span className="text-[10px] text-amber-400 font-semibold px-2 py-0.5 rounded bg-amber-950/50 border border-amber-800/40">
-                      Pre-Review
-                    </span>
-                  </div>
-                  <pre className="text-xs font-mono text-slate-300 whitespace-pre-wrap max-h-96 overflow-y-auto p-3 bg-slate-950 rounded-lg border border-slate-900 leading-relaxed">
-                    {existingPrompt}
-                  </pre>
-                </div>
+              {/* Standard 10-Section Structured Prompt Viewer */}
+              {viewMode === 'structured' ? (
+                <StructuredPromptViewer
+                  promptText={reviewResult.revisedPrompt}
+                  structuredSections={reviewResult.structuredSections}
+                  onSendToSandbox={onSendToSandbox}
+                  onRefine={() => {}}
+                  targetModel={modelSettings.selectedModel}
+                />
+              ) : (
+                <div className="rounded-2xl bg-slate-900/90 border border-slate-800 overflow-hidden shadow-2xl">
+                  <div className="px-5 py-3.5 border-b border-slate-800 bg-slate-950/60 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      <h3 className="text-sm font-bold text-slate-100">Side-by-Side Architectural Diff</h3>
+                    </div>
 
-                {/* Revised */}
-                <div className="p-4 space-y-2 bg-slate-950/20">
-                  <div className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between">
-                    <span>Amended Standard 10-Section Specification</span>
-                    <span className="text-[10px] text-emerald-300 font-semibold px-2 py-0.5 rounded bg-emerald-950/50 border border-emerald-800/40">
-                      Standardized & Hardened
-                    </span>
+                    <button
+                      onClick={handleCopyRevised}
+                      className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-sm transition"
+                    >
+                      {copiedRevised ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-300" />
+                          <span>Copied Revised!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy Revised</span>
+                        </>
+                      )}
+                    </button>
                   </div>
-                  <pre className="text-xs font-mono text-slate-100 whitespace-pre-wrap max-h-96 overflow-y-auto p-3 bg-slate-950 rounded-lg border border-slate-900 leading-relaxed">
-                    {reviewResult.revisedPrompt}
-                  </pre>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
+                    {/* Original */}
+                    <div className="p-4 space-y-2 bg-slate-950/40">
+                      <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                        <span>Input Prompt Submitted</span>
+                        <span className="text-[10px] text-amber-400 font-semibold px-2 py-0.5 rounded bg-amber-950/50 border border-amber-800/40">
+                          Pre-Review
+                        </span>
+                      </div>
+                      <pre className="text-xs font-mono text-slate-300 whitespace-pre-wrap max-h-96 overflow-y-auto p-3 bg-slate-950 rounded-lg border border-slate-900 leading-relaxed">
+                        {existingPrompt}
+                      </pre>
+                    </div>
+
+                    {/* Revised */}
+                    <div className="p-4 space-y-2 bg-slate-950/20">
+                      <div className="text-[11px] font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between">
+                        <span>Amended Standard 10-Section Specification</span>
+                        <span className="text-[10px] text-emerald-300 font-semibold px-2 py-0.5 rounded bg-emerald-950/50 border border-emerald-800/40">
+                          Standardized & Hardened
+                        </span>
+                      </div>
+                      <pre className="text-xs font-mono text-slate-100 whitespace-pre-wrap max-h-96 overflow-y-auto p-3 bg-slate-950 rounded-lg border border-slate-900 leading-relaxed">
+                        {reviewResult.revisedPrompt}
+                      </pre>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
+              )}
+            </>
           )}
         </div>
       )}

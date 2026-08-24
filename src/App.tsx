@@ -106,13 +106,58 @@ export default function App() {
     });
   };
 
+  // Safe fetch helper for both development and Vercel serverless environments with timeout guard
+  const safeFetchJson = async <T,>(url: string, options: RequestInit, timeoutMs = 35000): Promise<T> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      const text = await response.text();
+      
+      let data: any = null;
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        if (text.includes('GEMINI_API_KEY') || response.status === 500 || text.includes('server error') || text.includes('Server error')) {
+          throw new Error(
+            'Vercel Serverless Error: Please ensure your GEMINI_API_KEY environment variable is configured in your Vercel Project Settings (Settings > Environment Variables) and redeploy.'
+          );
+        }
+        throw new Error(text || `Server returned HTTP status ${response.status}`);
+      }
+
+      if (!response.ok) {
+        if (data?.error?.includes('GEMINI_API_KEY') || data?.message?.includes('GEMINI_API_KEY')) {
+          throw new Error(
+            'GEMINI_API_KEY is missing or invalid. Please check your Vercel Project Settings > Environment Variables.'
+          );
+        }
+        throw new Error(data?.error || data?.message || `Request failed with status ${response.status}`);
+      }
+
+      return data as T;
+    } catch (fetchErr: any) {
+      clearTimeout(timer);
+      if (fetchErr.name === 'AbortError') {
+        throw new Error('The request timed out after 35 seconds. Google Gemini may be experiencing high demand. Please try again.');
+      }
+      throw fetchErr;
+    }
+  };
+
   // 1. Generate & Architect Prompt
   const handleGeneratePrompt = async (roughPrompt: string, contextConfig?: any, force?: boolean) => {
     setArchitectInput(roughPrompt);
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch('/api/architect/generate', {
+      const data = await safeFetchJson<ArchitectResult>('/api/architect/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -124,12 +169,6 @@ export default function App() {
         }),
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Failed to architect prompt.');
-      }
-
-      const data: ArchitectResult = await response.json();
       setArchitectResult(data);
 
       if (data.optimizedPromptText) {
@@ -154,27 +193,22 @@ export default function App() {
   };
 
   // 2. Review Existing Prompt
-  const handleReviewPrompt = async (existingPrompt: string) => {
+  const handleReviewPrompt = async (existingPrompt: string, force?: boolean) => {
     setReviewInput(existingPrompt);
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch('/api/architect/review', {
+      const data = await safeFetchJson<ReviewResult>('/api/architect/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           existingPrompt,
+          forceGenerate: force,
           model: modelSettings.selectedModel,
           temperature: modelSettings.temperature,
         }),
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Failed to review prompt.');
-      }
-
-      const data: ReviewResult = await response.json();
       setReviewResult(data);
 
       if (data.revisedPrompt) {
@@ -209,7 +243,7 @@ export default function App() {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch('/api/architect/execute', {
+      const data = await safeFetchJson<ExecutionResult>('/api/architect/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -221,12 +255,6 @@ export default function App() {
         }),
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Failed to execute prompt in Gemini.');
-      }
-
-      const data: ExecutionResult = await response.json();
       setExecutionResult(data);
       return data;
     } catch (err: any) {
@@ -243,7 +271,7 @@ export default function App() {
     setIsRefining(true);
     setErrorMessage(null);
     try {
-      const response = await fetch('/api/architect/refine', {
+      const data = await safeFetchJson<any>('/api/architect/refine', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -254,12 +282,6 @@ export default function App() {
         }),
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Failed to refine prompt.');
-      }
-
-      const data = await response.json();
       if (data.refinedPromptText) {
         setArchitectResult((prev) => {
           if (!prev) return null;

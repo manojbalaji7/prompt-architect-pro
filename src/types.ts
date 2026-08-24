@@ -71,10 +71,13 @@ export interface ReviewResult {
   breakdown: ReadinessScoreBreakdown;
   strengths: string[];
   weaknesses: string[];
-  revisedPrompt: string;
+  revisedPrompt?: string;
   structuredSections?: OptimizedPromptSections;
   explanationOfImprovements: string;
   remainingPlaceholders: string[];
+  clarificationQuestions?: string[];
+  provisionalOutline?: string;
+  status?: 'ready' | 'needs_clarification' | 'critically_incomplete';
 }
 
 export interface ExecutionVerification {
