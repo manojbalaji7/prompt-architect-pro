@@ -7,8 +7,41 @@ import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
+// Safe directory resolution for both ESM (tsx / Vercel) and CommonJS (esbuild bundled dist/server.cjs)
+function getCurrentDir(): string {
+  if (typeof __dirname !== 'undefined') {
+    return __dirname;
+  }
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta.url) {
+      return path.dirname(fileURLToPath(import.meta.url));
+    }
+  } catch {}
+  return process.cwd();
+}
+
+const currentDir = getCurrentDir();
+
+const isServerless = Boolean(
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.LAMBDA_TASK_ROOT ||
+  process.env.NETLIFY
+);
+
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// Enable CORS for Vercel / serverless deployments
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -706,8 +739,21 @@ Return strictly the updated complete prompt and an explanation of changes.
 app.use('/api', apiRouter);
 app.use('/', apiRouter);
 
-// Vite middleware setup
+// Global Error Handler so serverless invocation never fails silently
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[Unhandled Server Error]', err);
+  if (!res.headersSent) {
+    res.status(500).json({
+      error: err?.message || 'An internal server error occurred.',
+      code: 'INTERNAL_SERVER_ERROR',
+    });
+  }
+});
+
+// Vite & Static file serving (only for local dev & standalone container, not Vercel Serverless)
 export async function startServer() {
+  if (isServerless) return;
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -717,8 +763,8 @@ export async function startServer() {
     app.use(vite.middlewares);
   } else {
     const cwdDist = path.join(process.cwd(), 'dist');
-    const relativeDist = path.resolve(__dirname, '..', 'dist');
-    const directDist = path.resolve(__dirname, 'dist');
+    const relativeDist = path.resolve(currentDir, '..', 'dist');
+    const directDist = path.resolve(currentDir, 'dist');
     
     let distPath = cwdDist;
     if (fs.existsSync(path.join(cwdDist, 'index.html'))) {
@@ -735,14 +781,12 @@ export async function startServer() {
     });
   }
 
-  if (!process.env.VERCEL) {
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Prompt Architect Pro Server listening on http://0.0.0.0:${PORT}`);
-    });
-  }
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Prompt Architect Pro Server listening on http://0.0.0.0:${PORT}`);
+  });
 }
 
-if (!process.env.VERCEL) {
+if (!isServerless) {
   startServer();
 }
 
