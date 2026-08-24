@@ -18,9 +18,16 @@ const apiRouter = express.Router();
 let aiClient: GoogleGenAI | null = null;
 function getAI(): GoogleGenAI {
   if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const rawKey =
+      process.env.GEMINI_API_KEY ||
+      process.env.VITE_GEMINI_API_KEY ||
+      process.env.GOOGLE_API_KEY ||
+      process.env.GOOGLE_GENAI_API_KEY ||
+      process.env.API_KEY;
+
+    const apiKey = rawKey ? rawKey.trim().replace(/^["']|["']$/g, '') : '';
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY environment variable is missing or not set.');
+      throw new Error('GEMINI_API_KEY environment variable is missing or not set in Vercel / server.');
     }
     aiClient = new GoogleGenAI({
       apiKey,
@@ -145,7 +152,40 @@ ${antiHallucinationRules || 'Do not fabricate facts, statistics, names, citation
 ${successCriteria || 'Deliverable satisfies all objective criteria, adheres to formatting rules, and passes all validation checks.'}`;
 }
 
-// Helper to validate and pick model
+// Helper to safely parse JSON from Gemini model output even if markdown wrapped or slightly malformed
+function safeParseJson(rawText: string): any {
+  if (!rawText || typeof rawText !== 'string') return {};
+  let cleaned = rawText.trim();
+  
+  // Strip Markdown code fences if present
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.slice(7);
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.slice(3);
+  }
+  if (cleaned.endsWith('```')) {
+    cleaned = cleaned.slice(0, -3);
+  }
+  cleaned = cleaned.trim();
+
+  try {
+    return JSON.parse(cleaned);
+  } catch (e1) {
+    // Attempt extracting the JSON substring between { and }
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        const sub = cleaned.substring(firstBrace, lastBrace + 1);
+        return JSON.parse(sub);
+      } catch (e2) {}
+    }
+    console.error('Failed to parse JSON from model output. Raw output was:', rawText.slice(0, 300));
+    throw new Error('The AI engine returned a response that could not be parsed as JSON. Please retry.');
+  }
+}
+
+// Helper to validate and pick model (strictly Gemini 3 series models)
 const VALID_MODELS = ['gemini-3.7-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'];
 const resolveModel = (requestedModel?: string): string => {
   if (requestedModel && VALID_MODELS.includes(requestedModel)) {
@@ -154,7 +194,7 @@ const resolveModel = (requestedModel?: string): string => {
   return 'gemini-3.7-flash';
 };
 
-// Resilient wrapper for Gemini calls with automatic fast retry and model fallback on 503 / 429
+// Resilient wrapper for Gemini calls with automatic fast model fallback on 503 / 429
 async function generateContentWithRetry(params: {
   model: string;
   contents: any;
@@ -164,12 +204,11 @@ async function generateContentWithRetry(params: {
 }) {
   const { model, contents, config, maxRetries = 1, timeoutMs = 20000 } = params;
   
-  // Resilient model fallback chain if a model is unavailable, congested (503), or rate-limited (429)
+  // Resilient model fallback chain using only valid Gemini 3 models
   const fallbackChain: string[] = [model];
-  if (!fallbackChain.includes('gemini-3.1-flash-lite')) fallbackChain.push('gemini-3.1-flash-lite');
   if (!fallbackChain.includes('gemini-3.7-flash')) fallbackChain.push('gemini-3.7-flash');
-  if (!fallbackChain.includes('gemini-flash-latest')) fallbackChain.push('gemini-flash-latest');
-  if (!fallbackChain.includes('gemini-2.5-flash')) fallbackChain.push('gemini-2.5-flash');
+  if (!fallbackChain.includes('gemini-3.1-flash-lite')) fallbackChain.push('gemini-3.1-flash-lite');
+  if (!fallbackChain.includes('gemini-3.1-pro-preview')) fallbackChain.push('gemini-3.1-pro-preview');
 
   const fallbackModels = Array.from(new Set(fallbackChain));
   let lastError: any = null;
@@ -178,53 +217,41 @@ async function generateContentWithRetry(params: {
     const currentModel = fallbackModels[mIdx];
     const isLastModel = mIdx === fallbackModels.length - 1;
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        const cleanConfig = { ...config };
-        // Adjust thinking config if model doesn't support thinkingConfig (only 3.7 flash supports thinkingConfig)
-        if (cleanConfig.thinkingConfig && !currentModel.includes('3.7')) {
-          delete cleanConfig.thinkingConfig;
-        }
+    try {
+      const cleanConfig = { ...config };
+      // Adjust thinking config if model doesn't support thinkingConfig (only 3.7 flash supports thinkingConfig)
+      if (cleanConfig.thinkingConfig && !currentModel.includes('3.7')) {
+        delete cleanConfig.thinkingConfig;
+      }
 
-        // Wrap call in a timeout promise to guarantee it never hangs
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error(`Model ${currentModel} request timed out after ${timeoutMs / 1000}s`)), timeoutMs);
-        });
+      // Wrap call in a timeout promise to guarantee it never hangs
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`Model ${currentModel} request timed out after ${timeoutMs / 1000}s`)), timeoutMs);
+      });
 
-        const apiCallPromise = getAI().models.generateContent({
-          model: currentModel,
-          contents,
-          config: cleanConfig,
-        });
+      const apiCallPromise = getAI().models.generateContent({
+        model: currentModel,
+        contents,
+        config: cleanConfig,
+      });
 
-        const response = (await Promise.race([apiCallPromise, timeoutPromise])) as any;
-        return { response, usedModel: currentModel };
-      } catch (err: any) {
-        lastError = err;
-        const errMsg = err?.message || (typeof err === 'string' ? err : JSON.stringify(err));
-        const isUnavailable = err?.status === 503 || err?.code === 503 || errMsg.includes('503') || errMsg.includes('high demand') || errMsg.includes('UNAVAILABLE') || errMsg.includes('timed out');
-        const isRateLimit = err?.status === 429 || err?.code === 429 || errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota');
+      const response = (await Promise.race([apiCallPromise, timeoutPromise])) as any;
+      return { response, usedModel: currentModel };
+    } catch (err: any) {
+      lastError = err;
+      const errMsg = err?.message || (typeof err === 'string' ? err : JSON.stringify(err));
+      const isUnavailable = err?.status === 503 || err?.code === 503 || errMsg.includes('503') || errMsg.includes('high demand') || errMsg.includes('UNAVAILABLE') || errMsg.includes('timed out');
+      const isRateLimit = err?.status === 429 || err?.code === 429 || errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota');
 
-        // If 503 or 429 on first attempt, retry once quickly (400ms)
-        if ((isUnavailable || isRateLimit) && attempt < maxRetries) {
-          const delay = 400 + Math.floor(Math.random() * 200);
-          console.warn(`[Retry] Model ${currentModel} temporary issue (503/429). Retrying in ${delay}ms...`);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          continue;
-        }
+      // If high demand (503) or rate limit (429) and we have fallback models available, switch immediately without blocking
+      if ((isRateLimit || isUnavailable) && !isLastModel) {
+        const nextModel = fallbackModels[mIdx + 1];
+        console.warn(`[Auto-Fallback] Model ${currentModel} unavailable/busy (${errMsg.slice(0, 100)}). Auto-switching to ${nextModel}...`);
+        continue;
+      }
 
-        // If still failing with 503/429/timeout and we have fallback models available, switch immediately
-        if ((isRateLimit || isUnavailable) && !isLastModel) {
-          const nextModel = fallbackModels[mIdx + 1];
-          console.warn(`[Fallback] Model ${currentModel} congested (503/429). Auto-switching to ${nextModel}...`);
-          break; // Break inner loop to try next model in outer loop
-        }
-
-        // If it's a fatal non-availability error or last model, rethrow
-        if (isLastModel) {
-          throw err;
-        }
-        break;
+      if (isLastModel) {
+        throw err;
       }
     }
   }
@@ -336,15 +363,45 @@ CRITICAL INSTRUCTION ON MISSING INFORMATION & PROMPT GATING:
     });
 
     const resultText = response.text || '{}';
-    const parsed = JSON.parse(resultText);
+    const parsed = safeParseJson(resultText);
     parsed.mode = 'architecture';
     parsed.model = usedModel;
+
+    // Normalize default fields to prevent frontend rendering defects
+    if (typeof parsed.readinessScore !== 'number') {
+      parsed.readinessScore = 75;
+    }
+    if (!parsed.breakdown) {
+      parsed.breakdown = {
+        objectiveClarity: 15,
+        necessaryContext: 12,
+        inputsAndSources: 12,
+        taskInstructions: 12,
+        constraints: 8,
+        outputFormat: 8,
+        successCriteria: 8,
+        riskPrivacyCompliance: 5,
+        totalScore: parsed.readinessScore,
+      };
+    }
+    if (!Array.isArray(parsed.knownInformation)) parsed.knownInformation = [];
+    if (!Array.isArray(parsed.assumptions)) parsed.assumptions = [];
+    if (!Array.isArray(parsed.missingInformation)) parsed.missingInformation = [];
+    if (!Array.isArray(parsed.placeholders)) parsed.placeholders = [];
+    if (!Array.isArray(parsed.clarificationQuestions)) parsed.clarificationQuestions = [];
 
     // Enforce prompt gating: if score < 80 and not forced, ensure no premature prompt template is returned
     if (!forceGenerate && parsed.readinessScore < 80) {
       parsed.optimizedPromptText = undefined;
       parsed.structuredSections = undefined;
       parsed.status = 'needs_clarification';
+      if (parsed.clarificationQuestions.length === 0) {
+        parsed.clarificationQuestions = [
+          'What specific input schema, data fields, or sample documents will be provided to the model?',
+          'What exact deliverable format, structure, or tone do you require for the final output?',
+          'Are there specific negative constraints, sensitive data boundaries, or edge cases to avoid?'
+        ];
+      }
     } else if (parsed.structuredSections) {
       parsed.optimizedPromptText = buildStandardPromptMarkdown(parsed.structuredSections, parsed.optimizedPromptText);
     }
@@ -447,15 +504,44 @@ CRITICAL RULES FOR INFORMATION GATING AND PROMPT REVIEW:
     });
 
     const resultText = response.text || '{}';
-    const parsed = JSON.parse(resultText);
+    const parsed = safeParseJson(resultText);
     parsed.mode = 'review';
     parsed.model = usedModel;
+
+    // Normalize default fields
+    if (typeof parsed.readinessScore !== 'number') {
+      parsed.readinessScore = 75;
+    }
+    if (!parsed.breakdown) {
+      parsed.breakdown = {
+        objectiveClarity: 15,
+        necessaryContext: 12,
+        inputsAndSources: 12,
+        taskInstructions: 12,
+        constraints: 8,
+        outputFormat: 8,
+        successCriteria: 8,
+        riskPrivacyCompliance: 5,
+        totalScore: parsed.readinessScore,
+      };
+    }
+    if (!Array.isArray(parsed.strengths)) parsed.strengths = [];
+    if (!Array.isArray(parsed.weaknesses)) parsed.weaknesses = [];
+    if (!Array.isArray(parsed.remainingPlaceholders)) parsed.remainingPlaceholders = [];
+    if (!Array.isArray(parsed.clarificationQuestions)) parsed.clarificationQuestions = [];
 
     // Enforce prompt gating: if score < 80 and not forced, ensure no premature revised prompt template is returned
     if (!forceGenerate && parsed.readinessScore < 80) {
       parsed.revisedPrompt = undefined;
       parsed.structuredSections = undefined;
       parsed.status = 'needs_clarification';
+      if (parsed.clarificationQuestions.length === 0) {
+        parsed.clarificationQuestions = [
+          'What specific input parameters, schema, or reference data does this prompt expect?',
+          'What exact output structure, format, or tone should be produced?',
+          'What negative constraints or edge-case boundaries should be strictly enforced?'
+        ];
+      }
     } else if (parsed.structuredSections) {
       parsed.revisedPrompt = buildStandardPromptMarkdown(parsed.structuredSections, parsed.revisedPrompt);
     }
@@ -605,7 +691,10 @@ Return strictly the updated complete prompt and an explanation of changes.
       },
     });
 
-    const parsed = JSON.parse(response.text || '{}');
+    const parsed = safeParseJson(response.text || '{}');
+    if (!parsed.refinedPromptText && parsed.structuredSections) {
+      parsed.refinedPromptText = buildStandardPromptMarkdown(parsed.structuredSections);
+    }
     return res.json(parsed);
   } catch (err: any) {
     console.error('Error in /api/architect/refine:', err);

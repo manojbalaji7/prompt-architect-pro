@@ -114,6 +114,10 @@ export default function App() {
     try {
       const response = await fetch(url, {
         ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers || {}),
+        },
         signal: controller.signal,
       });
       clearTimeout(timer);
@@ -124,21 +128,22 @@ export default function App() {
       try {
         data = text ? JSON.parse(text) : {};
       } catch {
-        if (text.includes('GEMINI_API_KEY') || response.status === 500 || text.includes('server error') || text.includes('Server error')) {
-          throw new Error(
-            'Vercel Serverless Error: Please ensure your GEMINI_API_KEY environment variable is configured in your Vercel Project Settings (Settings > Environment Variables) and redeploy.'
-          );
+        // If response is HTML or plain text error
+        if (text.includes('GEMINI_API_KEY')) {
+          throw new Error('GEMINI_API_KEY is not configured in Vercel environment variables. Please check your Vercel Project Settings > Environment Variables.');
+        }
+        if (response.status === 404) {
+          throw new Error(`API endpoint not found (${url}). Please ensure the serverless backend is deployed.`);
         }
         throw new Error(text || `Server returned HTTP status ${response.status}`);
       }
 
       if (!response.ok) {
-        if (data?.error?.includes('GEMINI_API_KEY') || data?.message?.includes('GEMINI_API_KEY')) {
-          throw new Error(
-            'GEMINI_API_KEY is missing or invalid. Please check your Vercel Project Settings > Environment Variables.'
-          );
+        const errorMsg = data?.error || data?.message || `Request failed with status ${response.status}`;
+        if (errorMsg.includes('GEMINI_API_KEY')) {
+          throw new Error('GEMINI_API_KEY is missing or invalid in your environment variables. Please check your project settings.');
         }
-        throw new Error(data?.error || data?.message || `Request failed with status ${response.status}`);
+        throw new Error(errorMsg);
       }
 
       return data as T;
